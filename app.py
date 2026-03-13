@@ -5,14 +5,25 @@ import time
 from dotenv import load_dotenv
 from supabase import create_client
 
-# 載入環境變數
+# 載入環境變數 (本地開發用)
 load_dotenv()
 
 # --- 1. 資料處理類別 (Data Logic) ---
 class NovelManager:
     def __init__(self):
-        self.supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-        self.webhook_url = os.getenv("N8N_WEBHOOK_URL")
+        # 【關鍵修復】雙重保險抓取法：優先抓 Secrets，次要抓 os.getenv
+        url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
+        
+        # 檢查變數是否真的存在
+        if not url or not key:
+            st.error("❌ 找不到 Supabase 設定！請檢查 Streamlit Cloud 的 Secrets 或本地 .env 檔案。")
+            st.stop()
+            
+        self.supabase = create_client(url, key)
+        
+        # Webhook 網址同樣使用雙重保險
+        self.webhook_url = st.secrets.get("N8N_WEBHOOK_URL") or os.getenv("N8N_WEBHOOK_URL")
         self.table_name = "n8n_novel_UI"
 
     def get_book_list(self):
@@ -53,27 +64,27 @@ class NovelManager:
 
     def trigger_n8n(self, book_name):
         """觸發 n8n Webhook"""
+        if not self.webhook_url:
+            st.error("❌ 找不到 N8N_WEBHOOK_URL 設定！")
+            return False
         try:
             payload = {"book_name": book_name}
-            # 設定較短的 timeout，因為我們只要觸發，後續交給 Polling
             requests.post(self.webhook_url, json=payload, timeout=5)
             return True
         except Exception as e:
-            print(f"Webhook Error: {e}")
+            st.error(f"Webhook 連線失敗: {e}")
             return False
 
 # --- 2. 介面類別 (UI Logic) ---
 class NovelUI:
     def __init__(self):
         self.manager = NovelManager()
-        # 初始化 Session State 防止重複觸發
         if 'is_generating' not in st.session_state:
             st.session_state.is_generating = False
 
     def render_sidebar(self):
         st.sidebar.header("📚 作品管理")
         
-        # 1. 建立新作品
         with st.sidebar.expander("✨ 建立新小說專案"):
             with st.form("new_book"):
                 n_name = st.text_input("小說名稱")
@@ -88,11 +99,9 @@ class NovelUI:
                     else:
                         st.error("請填寫書名與內容")
 
-        # 2. 切換作品
         options = self.manager.get_book_list()
         current_book = st.sidebar.selectbox("切換當前小說", ["請選擇"] + options)
 
-        # 3. 危險操作區
         if current_book != "請選擇":
             st.sidebar.markdown("---")
             st.sidebar.subheader("⚠️ 危險操作")
@@ -122,7 +131,6 @@ class NovelUI:
             st.info("👋 請在左側選單選擇或建立一個怪談專案。")
             return
 
-        # 抓取最新進度
         latest_data = self.manager.get_latest_chapter(current_book)
         
         if latest_data:
@@ -136,7 +144,6 @@ class NovelUI:
             st.write(latest_data['content'])
             st.markdown("---")
 
-            # 生成按鈕邏輯
             if st.session_state.is_generating:
                 st.button("AI 正在解析規則中...", disabled=True)
                 self.handle_generation(current_book, latest_data['chapter_no'])
@@ -146,13 +153,11 @@ class NovelUI:
                     st.rerun()
 
     def handle_generation(self, book_name, current_ch):
-        """處理 n8n 觸發與資料庫輪詢"""
         if self.manager.trigger_n8n(book_name):
             with st.status("🔮 正在穿越怪談領域...", expanded=True) as status:
                 st.write("已傳送 Webhook 至 n8n...")
                 st.write("等待 AI 構思劇情與校對規則...")
                 
-                # 輪詢檢查 (最多等待 180 秒)
                 for i in range(90):
                     time.sleep(2)
                     check = self.manager.get_latest_chapter(book_name)
@@ -166,7 +171,6 @@ class NovelUI:
                 status.update(label="❌ 等待超時", state="error")
                 st.session_state.is_generating = False
         else:
-            st.error("連線 n8n 失敗，請檢查網路或環境變數。")
             st.session_state.is_generating = False
 
 # --- 3. 執行進入點 ---
